@@ -20,14 +20,6 @@ const mapsRoutes = require('./src/routes/mapsRoutes');
 const app = express();
 const server = http.createServer(app);
 
-// Configurar Socket.IO con CORS libre
-const io = socketIo(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-    credentials: true
-  }
-});
 
 // Middleware de seguridad
 app.use(helmet({
@@ -43,11 +35,35 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// CORS libre como solicitado
-app.use(cors({
-  origin: "*",
-  credentials: true
-}));
+const allowed = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);
+    if (allowed.includes(origin)) return cb(null, true);
+    cb(new Error(`CORS blocked: ${origin}`));
+  },
+  credentials: true,
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','X-Requested-With'],
+};
+app.use(require('cors')(corsOptions));
+app.options('*', require('cors')(corsOptions));
+
+const io = socketIo(server, {
+  cors: {
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      if (allowed.includes(origin)) return cb(null, true);
+      cb(new Error(`CORS blocked (socket): ${origin}`));
+    },
+    methods: ['GET','POST'],
+    credentials: true,
+  }
+});
 
 // Middleware de logging
 app.use(morgan('combined'));
