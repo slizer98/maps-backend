@@ -31,8 +31,9 @@ const io = socketIo(server, {
 
 // Middleware de seguridad
 app.use(helmet({
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false,
-  contentSecurityPolicy: false
+  crossOriginOpenerPolicy: false, // <-- IMPORTANTE
 }));
 
 // Rate limiting
