@@ -1,13 +1,12 @@
 // src/controllers/authController.js
-const admin = require('firebase-admin')
+const { verifyIdToken } = require('../config/firebase')
 const User = require('../models/User')
 
 /** Helpers **/
 function pickPublicUser(u) {
-  // En tu modelo User basado en Firestore, no existe `id` (a menos que lo agregues tú).
-  // Para mantener compatibilidad con el front, exponemos `id = uid`.
+  // Mapea el usuario de Firestore a la salida pública del API
   return {
-    id: u.uid,
+    id: u.uid,                     // compatibilidad con el front
     uid: u.uid,
     email: u.email || null,
     displayName: u.displayName || null,
@@ -39,8 +38,9 @@ class AuthController {
         return res.status(400).json({ success: false, error: 'Token de Firebase requerido' })
       }
 
-      // Verificar token con Firebase Admin
-      const decoded = await admin.auth().verifyIdToken(idToken)
+      // ✅ Verifica el token usando el wrapper (esto garantiza initializeApp)
+      const decoded = await verifyIdToken(idToken)
+
       const { uid, email, name, picture, email_verified, phone_number } = {
         uid: decoded.uid,
         email: decoded.email,
@@ -50,11 +50,10 @@ class AuthController {
         phone_number: decoded.phone_number,
       }
 
-      // Buscar usuario por uid (doc id = uid en tu modelo)
+      // Buscar/crear usuario en Firestore (doc id = uid)
       let user = await User.findById(uid)
 
       if (!user) {
-        // Crear usuario en Firestore
         user = await User.create({
           uid,
           email: email || null,
@@ -81,9 +80,7 @@ class AuthController {
           },
         })
       } else {
-        // Actualizar presencia
         await User.setOnlineStatus(uid, true)
-        // Refrescar instancia
         user = await User.findById(uid)
       }
 
@@ -94,22 +91,19 @@ class AuthController {
       })
     } catch (error) {
       console.error('Error en login:', error)
-
-      // Caso TLS local (no debería suceder en Render, pero lo dejamos por claridad)
-      if (error?.code === 'auth/argument-error' && /SELF_SIGNED_CERT_IN_CHAIN/i.test(error?.errorInfo?.message || error.message)) {
+      // Errores comunes (si alguna vez corre en local sin TLS confiable)
+      if (/SELF_SIGNED_CERT_IN_CHAIN/i.test(error?.message || '')) {
         return res.status(502).json({
           success: false,
           error: 'No se pudo verificar el token por certificados TLS. En local, configura NODE_EXTRA_CA_CERTS o usa backend en producción.',
         })
       }
-
-      if (error?.code === 'auth/id-token-expired') {
+      if (/id-?token.*expir/i.test(error?.message || '')) {
         return res.status(401).json({ success: false, error: 'Token expirado' })
       }
-      if (error?.code === 'auth/invalid-id-token' || /invalid.*id.?token/i.test(error?.message || '')) {
+      if (/invalid.*id.?token/i.test(error?.message || '')) {
         return res.status(401).json({ success: false, error: 'Token inválido' })
       }
-
       return res.status(500).json({ success: false, error: 'Error interno del servidor' })
     }
   }
@@ -122,7 +116,7 @@ class AuthController {
         return res.status(400).json({ success: false, error: 'Token de Firebase requerido' })
       }
 
-      const decoded = await admin.auth().verifyIdToken(idToken)
+      const decoded = await verifyIdToken(idToken)
       const { uid, email, name, picture, email_verified, phone_number } = {
         uid: decoded.uid,
         email: decoded.email,
@@ -172,14 +166,12 @@ class AuthController {
       })
     } catch (error) {
       console.error('Error en registro:', error)
-
-      if (error?.code === 'auth/id-token-expired') {
+      if (/id-?token.*expir/i.test(error?.message || '')) {
         return res.status(401).json({ success: false, error: 'Token expirado' })
       }
-      if (error?.code === 'auth/invalid-id-token') {
+      if (/invalid.*id.?token/i.test(error?.message || '')) {
         return res.status(401).json({ success: false, error: 'Token inválido' })
       }
-
       return res.status(500).json({ success: false, error: 'Error interno del servidor' })
     }
   }
@@ -187,7 +179,6 @@ class AuthController {
   // POST /api/auth/logout
   async logout(req, res) {
     try {
-      // `req.user` debe venir poblado por tu middleware de auth (ya verificado el token)
       const uid = req.user?.uid || req.user?.id
       if (!uid) {
         return res.status(401).json({ success: false, error: 'No autenticado' })
@@ -279,7 +270,6 @@ class AuthController {
 
       await User.updateLocation(uid, { latitude: lat, longitude: lng, accuracy })
 
-      // Devuelve el usuario actualizado (para traer location con timestamp)
       const updated = await User.findById(uid)
       return res.json({
         success: true,
