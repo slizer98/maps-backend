@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
+    "dev:insecure": "cross-env NODE_TLS_REJECT_UNAUTHORIZED=0 node src/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": ["express", "socket.io", "firebase", "google-maps", "real-time"],

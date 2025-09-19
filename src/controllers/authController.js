@@ -1,346 +1,311 @@
-const admin = require('firebase-admin');
-const User = require('../models/User');
+// src/controllers/authController.js
+const admin = require('firebase-admin')
+const User = require('../models/User')
+
+/** Helpers **/
+function pickPublicUser(u) {
+  // En tu modelo User basado en Firestore, no existe `id` (a menos que lo agregues tú).
+  // Para mantener compatibilidad con el front, exponemos `id = uid`.
+  return {
+    id: u.uid,
+    uid: u.uid,
+    email: u.email || null,
+    displayName: u.displayName || null,
+    photoURL: u.photoURL || null,
+    phoneNumber: u.phoneNumber || null,
+    role: u.role || 'user',
+    isOnline: !!u.isOnline,
+    lastSeen: u.lastSeen || null,
+    location: u.location || null,
+    createdAt: u.createdAt || null,
+    updatedAt: u.updatedAt || null,
+    preferences: u.preferences || undefined,
+    stats: u.stats || undefined,
+  }
+}
+
+function safeDisplayName(decoded, userData) {
+  const email = decoded.email || ''
+  const fromEmail = email.includes('@') ? email.split('@')[0] : null
+  return (userData?.displayName || decoded.name || fromEmail || 'Usuario')
+}
 
 class AuthController {
-  // Login con token de Firebase
+  // POST /api/auth/login
   async login(req, res) {
     try {
-      const { idToken } = req.body;
-
+      const { idToken } = req.body
       if (!idToken) {
-        return res.status(400).json({
-          success: false,
-          error: 'Token de Firebase requerido'
-        });
+        return res.status(400).json({ success: false, error: 'Token de Firebase requerido' })
       }
 
-      // Verificar token con Firebase
-      const decodedToken = await admin.auth().verifyIdToken(idToken);
-      const { uid, email, name, picture } = decodedToken;
+      // Verificar token con Firebase Admin
+      const decoded = await admin.auth().verifyIdToken(idToken)
+      const { uid, email, name, picture, email_verified, phone_number } = {
+        uid: decoded.uid,
+        email: decoded.email,
+        name: decoded.name,
+        picture: decoded.picture,
+        email_verified: decoded.email_verified,
+        phone_number: decoded.phone_number,
+      }
 
-      // Buscar o crear usuario en la base de datos
-      let user = await User.findByUid(uid);
-      
+      // Buscar usuario por uid (doc id = uid en tu modelo)
+      let user = await User.findById(uid)
+
       if (!user) {
-        // Crear nuevo usuario
+        // Crear usuario en Firestore
         user = await User.create({
           uid,
-          email,
-          displayName: name || email.split('@')[0],
+          email: email || null,
+          displayName: safeDisplayName({ email, name }, null),
           photoURL: picture || null,
+          emailVerified: !!email_verified,
+          phoneNumber: phone_number || null,
           role: 'user',
           isOnline: true,
           lastSeen: new Date(),
-          location: null
-        });
+          location: null,
+          currentRoom: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          preferences: {
+            notifications: true,
+            locationSharing: true,
+            theme: 'light',
+          },
+          stats: {
+            roomsJoined: 0,
+            messagesCount: 0,
+            tripsCompleted: 0,
+          },
+        })
       } else {
-        // Actualizar estado online
-        await User.updateById(user.id, {
-          isOnline: true,
-          lastSeen: new Date()
-        });
+        // Actualizar presencia
+        await User.setOnlineStatus(uid, true)
+        // Refrescar instancia
+        user = await User.findById(uid)
       }
 
-      res.json({
+      return res.json({
         success: true,
         message: 'Login exitoso',
-        user: {
-          id: user.id,
-          uid: user.uid,
-          email: user.email,
-          displayName: user.displayName,
-          photoURL: user.photoURL,
-          role: user.role,
-          isOnline: user.isOnline,
-          createdAt: user.createdAt
-        }
-      });
-
+        user: pickPublicUser(user),
+      })
     } catch (error) {
-      console.error('Error en login:', error);
-      
-      if (error.code === 'auth/id-token-expired') {
-        return res.status(401).json({
+      console.error('Error en login:', error)
+
+      // Caso TLS local (no debería suceder en Render, pero lo dejamos por claridad)
+      if (error?.code === 'auth/argument-error' && /SELF_SIGNED_CERT_IN_CHAIN/i.test(error?.errorInfo?.message || error.message)) {
+        return res.status(502).json({
           success: false,
-          error: 'Token expirado'
-        });
-      }
-      
-      if (error.code === 'auth/invalid-id-token') {
-        return res.status(401).json({
-          success: false,
-          error: 'Token inválido'
-        });
+          error: 'No se pudo verificar el token por certificados TLS. En local, configura NODE_EXTRA_CA_CERTS o usa backend en producción.',
+        })
       }
 
-      res.status(500).json({
-        success: false,
-        error: 'Error interno del servidor'
-      });
+      if (error?.code === 'auth/id-token-expired') {
+        return res.status(401).json({ success: false, error: 'Token expirado' })
+      }
+      if (error?.code === 'auth/invalid-id-token' || /invalid.*id.?token/i.test(error?.message || '')) {
+        return res.status(401).json({ success: false, error: 'Token inválido' })
+      }
+
+      return res.status(500).json({ success: false, error: 'Error interno del servidor' })
     }
   }
 
-  // Registro de usuario
+  // POST /api/auth/register
   async register(req, res) {
     try {
-      const { idToken, userData } = req.body;
-
+      const { idToken, userData } = req.body
       if (!idToken) {
-        return res.status(400).json({
-          success: false,
-          error: 'Token de Firebase requerido'
-        });
+        return res.status(400).json({ success: false, error: 'Token de Firebase requerido' })
       }
 
-      // Verificar token con Firebase
-      const decodedToken = await admin.auth().verifyIdToken(idToken);
-      const { uid, email, name, picture } = decodedToken;
-
-      // Verificar si el usuario ya existe
-      const existingUser = await User.findByUid(uid);
-      if (existingUser) {
-        return res.status(409).json({
-          success: false,
-          error: 'Usuario ya registrado'
-        });
+      const decoded = await admin.auth().verifyIdToken(idToken)
+      const { uid, email, name, picture, email_verified, phone_number } = {
+        uid: decoded.uid,
+        email: decoded.email,
+        name: decoded.name,
+        picture: decoded.picture,
+        email_verified: decoded.email_verified,
+        phone_number: decoded.phone_number,
       }
 
-      // Crear nuevo usuario
+      const existing = await User.findById(uid)
+      if (existing) {
+        return res.status(409).json({ success: false, error: 'Usuario ya registrado' })
+      }
+
       const user = await User.create({
         uid,
-        email,
-        displayName: userData?.displayName || name || email.split('@')[0],
+        email: email || null,
+        displayName: safeDisplayName({ email, name }, userData),
         photoURL: userData?.photoURL || picture || null,
-        phoneNumber: userData?.phoneNumber || null,
+        emailVerified: !!email_verified,
+        phoneNumber: userData?.phoneNumber || phone_number || null,
         role: 'user',
         isOnline: true,
         lastSeen: new Date(),
-        location: null
-      });
+        location: null,
+        currentRoom: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        preferences: {
+          notifications: true,
+          locationSharing: true,
+          theme: 'light',
+          ...(userData?.preferences || {}),
+        },
+        stats: {
+          roomsJoined: 0,
+          messagesCount: 0,
+          tripsCompleted: 0,
+          ...(userData?.stats || {}),
+        },
+      })
 
-      res.status(201).json({
+      return res.status(201).json({
         success: true,
         message: 'Usuario registrado exitosamente',
-        user: {
-          id: user.id,
-          uid: user.uid,
-          email: user.email,
-          displayName: user.displayName,
-          photoURL: user.photoURL,
-          role: user.role,
-          isOnline: user.isOnline,
-          createdAt: user.createdAt
-        }
-      });
-
+        user: pickPublicUser(user),
+      })
     } catch (error) {
-      console.error('Error en registro:', error);
-      res.status(500).json({
-        success: false,
-        error: 'Error interno del servidor'
-      });
+      console.error('Error en registro:', error)
+
+      if (error?.code === 'auth/id-token-expired') {
+        return res.status(401).json({ success: false, error: 'Token expirado' })
+      }
+      if (error?.code === 'auth/invalid-id-token') {
+        return res.status(401).json({ success: false, error: 'Token inválido' })
+      }
+
+      return res.status(500).json({ success: false, error: 'Error interno del servidor' })
     }
   }
 
-  // Logout
+  // POST /api/auth/logout
   async logout(req, res) {
     try {
-      const userId = req.user.id;
+      // `req.user` debe venir poblado por tu middleware de auth (ya verificado el token)
+      const uid = req.user?.uid || req.user?.id
+      if (!uid) {
+        return res.status(401).json({ success: false, error: 'No autenticado' })
+      }
 
-      // Actualizar estado offline
-      await User.updateById(userId, {
-        isOnline: false,
-        lastSeen: new Date()
-      });
-
-      res.json({
-        success: true,
-        message: 'Logout exitoso'
-      });
-
+      await User.setOnlineStatus(uid, false)
+      return res.json({ success: true, message: 'Logout exitoso' })
     } catch (error) {
-      console.error('Error en logout:', error);
-      res.status(500).json({
-        success: false,
-        error: 'Error interno del servidor'
-      });
+      console.error('Error en logout:', error)
+      return res.status(500).json({ success: false, error: 'Error interno del servidor' })
     }
   }
 
-  // Obtener usuario actual
+  // GET /api/auth/me
   async me(req, res) {
     try {
-      const user = req.user;
+      const uid = req.user?.uid || req.user?.id
+      if (!uid) {
+        return res.status(401).json({ success: false, error: 'No autenticado' })
+      }
 
-      res.json({
-        success: true,
-        user: {
-          id: user.id,
-          uid: user.uid,
-          email: user.email,
-          displayName: user.displayName,
-          photoURL: user.photoURL,
-          phoneNumber: user.phoneNumber,
-          role: user.role,
-          isOnline: user.isOnline,
-          lastSeen: user.lastSeen,
-          location: user.location,
-          createdAt: user.createdAt,
-          updatedAt: user.updatedAt
-        }
-      });
+      const user = await User.findById(uid)
+      if (!user) {
+        return res.status(404).json({ success: false, error: 'Usuario no encontrado' })
+      }
 
+      return res.json({ success: true, user: pickPublicUser(user) })
     } catch (error) {
-      console.error('Error obteniendo usuario:', error);
-      res.status(500).json({
-        success: false,
-        error: 'Error interno del servidor'
-      });
+      console.error('Error obteniendo usuario:', error)
+      return res.status(500).json({ success: false, error: 'Error interno del servidor' })
     }
   }
 
-  // Actualizar perfil
+  // PUT /api/auth/profile
   async updateProfile(req, res) {
     try {
-      const userId = req.user.id;
-      const { displayName, photoURL, phoneNumber } = req.body;
+      const uid = req.user?.uid || req.user?.id
+      if (!uid) {
+        return res.status(401).json({ success: false, error: 'No autenticado' })
+      }
 
-      // Validaciones
+      const { displayName, photoURL, phoneNumber } = req.body
+
       if (displayName && displayName.trim().length < 2) {
-        return res.status(400).json({
-          success: false,
-          error: 'El nombre debe tener al menos 2 caracteres'
-        });
+        return res.status(400).json({ success: false, error: 'El nombre debe tener al menos 2 caracteres' })
       }
-
       if (phoneNumber && !/^\+?[\d\s\-\(\)]+$/.test(phoneNumber)) {
-        return res.status(400).json({
-          success: false,
-          error: 'Formato de teléfono inválido'
-        });
+        return res.status(400).json({ success: false, error: 'Formato de teléfono inválido' })
       }
 
-      // Actualizar usuario
-      const updatedUser = await User.updateById(userId, {
-        displayName: displayName?.trim(),
-        photoURL,
-        phoneNumber,
-        updatedAt: new Date()
-      });
+      const updated = await User.update(uid, {
+        ...(displayName !== undefined ? { displayName: displayName.trim() } : {}),
+        ...(photoURL !== undefined ? { photoURL } : {}),
+        ...(phoneNumber !== undefined ? { phoneNumber } : {}),
+      })
 
-      res.json({
+      return res.json({
         success: true,
         message: 'Perfil actualizado exitosamente',
-        user: {
-          id: updatedUser.id,
-          uid: updatedUser.uid,
-          email: updatedUser.email,
-          displayName: updatedUser.displayName,
-          photoURL: updatedUser.photoURL,
-          phoneNumber: updatedUser.phoneNumber,
-          role: updatedUser.role,
-          isOnline: updatedUser.isOnline,
-          lastSeen: updatedUser.lastSeen,
-          location: updatedUser.location,
-          createdAt: updatedUser.createdAt,
-          updatedAt: updatedUser.updatedAt
-        }
-      });
-
+        user: pickPublicUser(updated),
+      })
     } catch (error) {
-      console.error('Error actualizando perfil:', error);
-      res.status(500).json({
-        success: false,
-        error: 'Error interno del servidor'
-      });
+      console.error('Error actualizando perfil:', error)
+      return res.status(500).json({ success: false, error: 'Error interno del servidor' })
     }
   }
 
-  // Actualizar ubicación
+  // POST /api/auth/location
   async updateLocation(req, res) {
     try {
-      const userId = req.user.id;
-      const { latitude, longitude, accuracy } = req.body;
-
-      // Validaciones
-      if (!latitude || !longitude) {
-        return res.status(400).json({
-          success: false,
-          error: 'Latitud y longitud son requeridas'
-        });
+      const uid = req.user?.uid || req.user?.id
+      if (!uid) {
+        return res.status(401).json({ success: false, error: 'No autenticado' })
       }
 
-      if (latitude < -90 || latitude > 90) {
-        return res.status(400).json({
-          success: false,
-          error: 'Latitud inválida'
-        });
+      const { latitude, longitude, accuracy } = req.body
+      if (latitude === undefined || longitude === undefined) {
+        return res.status(400).json({ success: false, error: 'Latitud y longitud son requeridas' })
       }
 
-      if (longitude < -180 || longitude > 180) {
-        return res.status(400).json({
-          success: false,
-          error: 'Longitud inválida'
-        });
+      const lat = Number(latitude)
+      const lng = Number(longitude)
+      if (Number.isNaN(lat) || lat < -90 || lat > 90) {
+        return res.status(400).json({ success: false, error: 'Latitud inválida' })
+      }
+      if (Number.isNaN(lng) || lng < -180 || lng > 180) {
+        return res.status(400).json({ success: false, error: 'Longitud inválida' })
       }
 
-      // Actualizar ubicación
-      const location = {
-        latitude: parseFloat(latitude),
-        longitude: parseFloat(longitude),
-        accuracy: accuracy ? parseFloat(accuracy) : null,
-        timestamp: new Date()
-      };
+      await User.updateLocation(uid, { latitude: lat, longitude: lng, accuracy })
 
-      await User.updateById(userId, {
-        location,
-        lastSeen: new Date()
-      });
-
-      res.json({
+      // Devuelve el usuario actualizado (para traer location con timestamp)
+      const updated = await User.findById(uid)
+      return res.json({
         success: true,
         message: 'Ubicación actualizada exitosamente',
-        location
-      });
-
+        location: updated.location || null,
+      })
     } catch (error) {
-      console.error('Error actualizando ubicación:', error);
-      res.status(500).json({
-        success: false,
-        error: 'Error interno del servidor'
-      });
+      console.error('Error actualizando ubicación:', error)
+      return res.status(500).json({ success: false, error: 'Error interno del servidor' })
     }
   }
 
-  // Obtener usuarios online
+  // GET /api/auth/online
   async getOnlineUsers(req, res) {
     try {
-      const users = await User.findOnlineUsers();
-
-      res.json({
+      const users = await User.getOnlineUsers()
+      return res.json({
         success: true,
-        users: users.map(user => ({
-          id: user.id,
-          uid: user.uid,
-          displayName: user.displayName,
-          photoURL: user.photoURL,
-          role: user.role,
-          isOnline: user.isOnline,
-          lastSeen: user.lastSeen,
-          location: user.location
-        })),
-        count: users.length
-      });
-
+        users: users.map(pickPublicUser),
+        count: users.length,
+      })
     } catch (error) {
-      console.error('Error obteniendo usuarios online:', error);
-      res.status(500).json({
-        success: false,
-        error: 'Error interno del servidor'
-      });
+      console.error('Error obteniendo usuarios online:', error)
+      return res.status(500).json({ success: false, error: 'Error interno del servidor' })
     }
   }
 }
 
-module.exports = new AuthController();
-
+module.exports = new AuthController()
